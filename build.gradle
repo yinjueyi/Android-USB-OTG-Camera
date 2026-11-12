@@ -2,7 +2,7 @@
 buildscript {
     repositories {
         google()
-        jcenter()
+        mavenCentral()
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:4.0.1'
@@ -13,14 +13,11 @@ buildscript {
 allprojects {
     repositories {
         google()
-        //maven { url 'http://raw.github.com/saki4510t/libcommon/master/repository/' }
-        maven { url 'http://maven.aliyun.com/nexus/content/groups/public/' }
-        jcenter()
+        mavenCentral()
 
         flatDir {
-            dirs '../aars'
+            dirs "${rootDir}/aars"
         }
-
     }
 }
 
@@ -29,13 +26,10 @@ task clean(type: Delete) {
 }
 
 ext {
-    androidXVersion = '1.1.0'  // variable that can be referenced to keep support libs consistent
-    commonLibVersion= '4.1.1'
+    androidXVersion = '1.1.0'
+    commonLibVersion = '4.1.1'
     versionCompiler = 28
-    // when target=27, 9.0 is ok
     versionTarget = 27
-    // if hope supporting 4.4
-    // please modify it to 16
     minSdkVersion = 21
     versionCode = 99
     versionNameString = '1.2.1.20200414'
