@@ -155,6 +155,12 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         mUVCCameraView = (CameraViewInterface) mTextureView;
         mUVCCameraView.setCallback(this);
         mCameraHelper = UVCCameraHelper.getInstance();
+        // The helper is a process-wide singleton. During an Activity
+        // recreation its USB monitor may still exist, and requesting a new
+        // frame format would otherwise throw IllegalStateException.
+        if (mCameraHelper.getUSBMonitor() != null) {
+            mCameraHelper.release();
+        }
         mCameraHelper.setDefaultFrameFormat(UVCCameraHelper.FRAME_FORMAT_MJPEG);
         mCameraHelper.initUSBMonitor(this, mUVCCameraView, listener);
 
