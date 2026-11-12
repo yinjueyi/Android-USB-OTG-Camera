@@ -225,9 +225,19 @@ This fork adds an optional USB-camera AI observation feature:
 
 - A silent `AI Player` switch in the camera screen. It is on by default and
   never plays media audio itself.
-- Every time the user turns the switch on or off, the app captures one JPEG,
-  sends it to the configured DeepSeek vision endpoint, and speaks the returned
-  text using the Android system TextToSpeech engine.
+- The player is backed by an Android `MediaSession`, so the play/pause,
+  media-play, media-pause and headset-hook buttons from a connected Bluetooth
+  headset can control it. The on-screen switch and the headset stay in sync.
+- Android 8+ selects the Bluetooth media-button target from apps that have an
+  active local audio playback client. To make AVRCP routing reliable, the app
+  loops a bundled 16 KB silent WAV at volume 0 while the player is playing.
+  It is completely inaudible; it is not used for TTS or content playback.
+- Every playback-state transition (playing to paused, or paused to playing)
+  captures one JPEG, sends it to the configured DeepSeek vision endpoint, and
+  speaks the returned text using the Android system TextToSpeech engine.
+- Keep the camera screen open and make sure another music app is not holding
+  the active media session. Bluetooth AVRCP behavior can vary slightly between
+  phone and headset vendors.
 - The API key, prompt, model and endpoint can be edited at runtime through
   `AI设置(API Key/提示词)` in the toolbar overflow menu.
 - Default endpoint: `https://api.deepseek.com/chat/completions`

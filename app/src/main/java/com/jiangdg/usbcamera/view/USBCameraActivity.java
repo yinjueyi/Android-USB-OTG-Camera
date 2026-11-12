@@ -1,13 +1,21 @@
 package com.jiangdg.usbcamera.view;
 
+import android.content.Intent;
+import android.content.res.AssetFileDescriptor;
 import android.hardware.usb.UsbDevice;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.speech.tts.TextToSpeech;
 
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -40,6 +48,7 @@ import com.serenegiant.usb.encoder.RecordParams;
 import com.serenegiant.usb.widget.CameraViewInterface;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -83,6 +92,10 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     private TextToSpeech mTts;
     private volatile boolean mTtsReady;
     private ExecutorService mAiExecutor;
+    private MediaSession mMediaSession;
+    private MediaPlayer mSilentPlayer;
+    private boolean mAiPlayerPlaying = true;
+    private boolean mUpdatingAiPlayerSwitch;
 
     private UVCCameraHelper.OnMyDevConnectListener listener = new UVCCameraHelper.OnMyDevConnectListener() {
 
@@ -150,6 +163,8 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         initView();
         mAiExecutor = Executors.newSingleThreadExecutor();
         initTextToSpeech();
+        initSilentMediaPlayer();
+        initMediaSession();
 
         // step.1 initialize UVCCameraHelper
         mUVCCameraView = (CameraViewInterface) mTextureView;
@@ -214,23 +229,24 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
             }
         });
 
-        // This control intentionally does not play any audio. It represents
-        // the AI observation player state; each user toggle triggers one
-        // capture and one DeepSeek request.
+        // This player has no audible output. Its zero-volume silent playback
+        // anchor only makes Android route Bluetooth AVRCP media keys here.
+        // Each playback-state transition triggers one capture and one request.
+        mAiPlayerPlaying = true;
         mSwitchAiPlayer.setChecked(true);
         updateAiPlayerLabel(true);
         mSwitchAiPlayer.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            updateAiPlayerLabel(isChecked);
-            if (mTts != null) {
-                mTts.stop();
+            if (mUpdatingAiPlayerSwitch) {
+                return;
             }
-            triggerAiAnalysis();
+            setAiPlayerPlaying(isChecked, true);
         });
     }
 
     @Override
     protected void onStart() {
         super.onStart();
+        updateSilentPlayer(mAiPlayerPlaying);
         // step.2 register USB event broadcast
         if (mCameraHelper != null) {
             mCameraHelper.registerUSB();
@@ -243,6 +259,7 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         if (mTts != null) {
             mTts.stop();
         }
+        updateSilentPlayer(false);
         // step.3 unregister USB event broadcast
         if (mCameraHelper != null) {
             mCameraHelper.unregisterUSB();
@@ -354,6 +371,154 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
 
     private void updateAiPlayerLabel(boolean isPlaying) {
         mSwitchAiPlayer.setText(isPlaying ? "AI 播放器：开" : "AI 播放器：关");
+    }
+
+    private void setAiPlayerPlaying(boolean playing, boolean triggerAnalysis) {
+        boolean changed = mAiPlayerPlaying != playing;
+        mAiPlayerPlaying = playing;
+        if (mSwitchAiPlayer.isChecked() != playing) {
+            mUpdatingAiPlayerSwitch = true;
+            mSwitchAiPlayer.setChecked(playing);
+            mUpdatingAiPlayerSwitch = false;
+        }
+        updateAiPlayerLabel(playing);
+        updateMediaSessionPlaybackState(playing);
+        updateSilentPlayer(playing);
+        if (changed) {
+            if (mTts != null) {
+                mTts.stop();
+            }
+            if (triggerAnalysis) {
+                triggerAiAnalysis();
+            }
+        }
+    }
+
+    private void initSilentMediaPlayer() {
+        mSilentPlayer = new MediaPlayer();
+        mSilentPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build());
+        AssetFileDescriptor descriptor = null;
+        try {
+            descriptor = getResources().openRawResourceFd(R.raw.ai_player_silence);
+            mSilentPlayer.setDataSource(descriptor.getFileDescriptor(),
+                    descriptor.getStartOffset(), descriptor.getLength());
+            mSilentPlayer.setLooping(true);
+            // The stream is intentionally inaudible. Android uses actual
+            // media playback to select the Bluetooth media-button session.
+            mSilentPlayer.setVolume(0.0f, 0.0f);
+            mSilentPlayer.prepare();
+            updateSilentPlayer(mAiPlayerPlaying);
+        } catch (IOException | RuntimeException e) {
+            Log.e(TAG, "Unable to initialize silent media player", e);
+            if (mSilentPlayer != null) {
+                mSilentPlayer.release();
+                mSilentPlayer = null;
+            }
+        } finally {
+            if (descriptor != null) {
+                try {
+                    descriptor.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private void updateSilentPlayer(boolean playing) {
+        if (mSilentPlayer == null) {
+            return;
+        }
+        try {
+            if (playing) {
+                if (!mSilentPlayer.isPlaying()) {
+                    mSilentPlayer.start();
+                }
+            } else if (mSilentPlayer.isPlaying()) {
+                mSilentPlayer.pause();
+            }
+        } catch (IllegalStateException e) {
+            Log.w(TAG, "Unable to update silent media player", e);
+        }
+    }
+
+    private void initMediaSession() {
+        mMediaSession = new MediaSession(this, "USBCameraAiPlayer");
+        mMediaSession.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS
+                | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
+        mMediaSession.setCallback(new MediaSession.Callback() {
+            @Override
+            public void onPlay() {
+                setAiPlayerPlaying(true, true);
+            }
+
+            @Override
+            public void onPause() {
+                setAiPlayerPlaying(false, true);
+            }
+
+            @Override
+            public void onStop() {
+                setAiPlayerPlaying(false, true);
+            }
+
+            @Override
+            public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                KeyEvent event = mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                if (event != null && handleAiMediaKey(event.getKeyCode(), event)) {
+                    return true;
+                }
+                return super.onMediaButtonEvent(mediaButtonIntent);
+            }
+        });
+        updateMediaSessionPlaybackState(mAiPlayerPlaying);
+        mMediaSession.setActive(true);
+    }
+
+    private void updateMediaSessionPlaybackState(boolean playing) {
+        if (mMediaSession == null) {
+            return;
+        }
+        long actions = PlaybackState.ACTION_PLAY
+                | PlaybackState.ACTION_PAUSE
+                | PlaybackState.ACTION_PLAY_PAUSE
+                | PlaybackState.ACTION_STOP;
+        int state = playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED;
+        mMediaSession.setPlaybackState(new PlaybackState.Builder()
+                .setActions(actions)
+                .setState(state, playing ? SystemClock.elapsedRealtime() : 0L, 1.0f)
+                .build());
+    }
+
+    private boolean handleAiMediaKey(int keyCode, KeyEvent event) {
+        if (event.getAction() != KeyEvent.ACTION_DOWN || event.getRepeatCount() != 0) {
+            return false;
+        }
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+            case KeyEvent.KEYCODE_HEADSETHOOK:
+                setAiPlayerPlaying(!mAiPlayerPlaying, true);
+                return true;
+            case KeyEvent.KEYCODE_MEDIA_PLAY:
+                setAiPlayerPlaying(true, true);
+                return true;
+            case KeyEvent.KEYCODE_MEDIA_PAUSE:
+            case KeyEvent.KEYCODE_MEDIA_STOP:
+                setAiPlayerPlaying(false, true);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (handleAiMediaKey(keyCode, event)) {
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
     }
 
     private void showAiStatus(String message) {
@@ -567,6 +732,19 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
             mTts.shutdown();
             mTts = null;
             mTtsReady = false;
+        }
+        if (mMediaSession != null) {
+            mMediaSession.setActive(false);
+            mMediaSession.release();
+            mMediaSession = null;
+        }
+        if (mSilentPlayer != null) {
+            try {
+                mSilentPlayer.stop();
+            } catch (IllegalStateException ignored) {
+            }
+            mSilentPlayer.release();
+            mSilentPlayer = null;
         }
         // step.4 release uvc camera resources
         if (mCameraHelper != null) {
