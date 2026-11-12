@@ -95,4 +95,37 @@
         android:text="closeVoice"
         android:textColor="@color/colorWhite" />
 
+
+    <Switch
+        android:id="@+id/switch_ai_player"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_alignParentRight="true"
+        android:layout_alignTop="@+id/switch_rec_voice"
+        android:layout_marginEnd="13dp"
+        android:layout_marginRight="13dp"
+        android:checked="true"
+        android:text="AI 播放器：开"
+        android:textColor="@color/colorWhite" />
+
+    <TextView
+        android:id="@+id/tv_ai_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_alignParentRight="true"
+        android:layout_below="@+id/switch_ai_player"
+        android:layout_marginEnd="13dp"
+        android:layout_marginRight="13dp"
+        android:layout_marginTop="6dp"
+        android:background="#99000000"
+        android:ellipsize="end"
+        android:maxLines="6"
+        android:maxWidth="280dp"
+        android:padding="6dp"
+        android:textColor="@color/colorWhite"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
 </RelativeLayout>

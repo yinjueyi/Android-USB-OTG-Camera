@@ -4,6 +4,7 @@ import android.hardware.usb.UsbDevice;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.speech.tts.TextToSpeech;
 
 import android.text.TextUtils;
 import android.util.Log;
@@ -14,11 +15,15 @@ import android.view.Surface;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
+import android.widget.EditText;
 import android.widget.ListView;
 import android.widget.SeekBar;
 import android.widget.Switch;
+import android.widget.TextView;
 import android.widget.Toast;
 import com.jiangdg.usbcamera.R;
+import com.jiangdg.usbcamera.ai.AiSettings;
+import com.jiangdg.usbcamera.ai.DeepSeekVisionClient;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -34,8 +39,13 @@ import com.serenegiant.usb.common.AbstractUVCCameraHandler;
 import com.serenegiant.usb.encoder.RecordParams;
 import com.serenegiant.usb.widget.CameraViewInterface;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 import butterknife.BindView;
 import butterknife.ButterKnife;
@@ -58,6 +68,10 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     public SeekBar mSeekContrast;
     @BindView(R.id.switch_rec_voice)
     public Switch mSwitchVoice;
+    @BindView(R.id.switch_ai_player)
+    public Switch mSwitchAiPlayer;
+    @BindView(R.id.tv_ai_status)
+    public TextView mTvAiStatus;
 
     private UVCCameraHelper mCameraHelper;
     private CameraViewInterface mUVCCameraView;
@@ -65,6 +79,10 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
 
     private boolean isRequest;
     private boolean isPreview;
+
+    private TextToSpeech mTts;
+    private volatile boolean mTtsReady;
+    private ExecutorService mAiExecutor;
 
     private UVCCameraHelper.OnMyDevConnectListener listener = new UVCCameraHelper.OnMyDevConnectListener() {
 
@@ -130,6 +148,8 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
         setContentView(R.layout.activity_usbcamera);
         ButterKnife.bind(this);
         initView();
+        mAiExecutor = Executors.newSingleThreadExecutor();
+        initTextToSpeech();
 
         // step.1 initialize UVCCameraHelper
         mUVCCameraView = (CameraViewInterface) mTextureView;
@@ -187,6 +207,19 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
 
             }
         });
+
+        // This control intentionally does not play any audio. It represents
+        // the AI observation player state; each user toggle triggers one
+        // capture and one DeepSeek request.
+        mSwitchAiPlayer.setChecked(true);
+        updateAiPlayerLabel(true);
+        mSwitchAiPlayer.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            updateAiPlayerLabel(isChecked);
+            if (mTts != null) {
+                mTts.stop();
+            }
+            triggerAiAnalysis();
+        });
     }
 
     @Override
@@ -201,6 +234,9 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     @Override
     protected void onStop() {
         super.onStop();
+        if (mTts != null) {
+            mTts.stop();
+        }
         // step.3 unregister USB event broadcast
         if (mCameraHelper != null) {
             mCameraHelper.unregisterUSB();
@@ -303,8 +339,169 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
                 }
                 mCameraHelper.startCameraFoucs();
                 break;
+            case R.id.menu_ai_settings:
+                showAiSettingsDialog();
+                break;
         }
         return super.onOptionsItemSelected(item);
+    }
+
+    private void updateAiPlayerLabel(boolean isPlaying) {
+        mSwitchAiPlayer.setText(isPlaying ? "AI 播放器：开" : "AI 播放器：关");
+    }
+
+    private void showAiStatus(String message) {
+        mTvAiStatus.setVisibility(View.VISIBLE);
+        mTvAiStatus.setText(message);
+    }
+
+    private void triggerAiAnalysis() {
+        if (mCameraHelper == null || !mCameraHelper.isCameraOpened()) {
+            showAiStatus("摄像头未打开，无法拍照");
+            showShortMsg("请先连接并打开 USB 摄像头");
+            return;
+        }
+
+        final AiSettings.Config config = AiSettings.load(this);
+        if (TextUtils.isEmpty(config.apiKey)) {
+            showAiStatus("请先点击菜单中的“AI设置”填写 API Key");
+            showAiSettingsDialog();
+            return;
+        }
+
+        File captureDir = new File(getCacheDir(), "ai_captures");
+        if (!captureDir.exists() && !captureDir.mkdirs()) {
+            showAiStatus("无法创建临时拍照目录");
+            return;
+        }
+        final File imageFile = new File(captureDir,
+                "ai_capture_" + System.currentTimeMillis() + ".jpg");
+
+        showAiStatus("正在拍照...");
+        mCameraHelper.capturePicture(imageFile.getAbsolutePath(), path -> runOnUiThread(() -> {
+            if (TextUtils.isEmpty(path)) {
+                showAiStatus("拍照失败");
+                return;
+            }
+            final ExecutorService executor = mAiExecutor;
+            if (executor == null) {
+                showAiStatus("AI 请求队列已关闭，请重新打开页面");
+                return;
+            }
+            showAiStatus("正在请求 DeepSeek...");
+            try {
+                executor.execute(() -> requestDeepSeekAnalysis(new File(path), config));
+            } catch (RejectedExecutionException e) {
+                showAiStatus("AI 请求队列已关闭，请重新打开页面");
+            }
+        }));
+    }
+
+    private void requestDeepSeekAnalysis(File imageFile, AiSettings.Config config) {
+        try {
+            String answer = DeepSeekVisionClient.analyze(imageFile, config);
+            runOnUiThread(() -> {
+                showAiStatus(answer);
+                speakAiResult(answer);
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "DeepSeek request failed", e);
+            String message = e.getMessage();
+            if (TextUtils.isEmpty(message)) {
+                message = e.getClass().getSimpleName();
+            }
+            final String errorMessage = "AI 请求失败：" + message;
+            runOnUiThread(() -> {
+                showAiStatus(errorMessage);
+                showShortMsg("AI 请求失败，请查看界面提示");
+            });
+        } finally {
+            if (imageFile.exists() && !imageFile.delete()) {
+                Log.w(TAG, "Failed to delete temporary AI image: " + imageFile);
+            }
+        }
+    }
+
+    private void initTextToSpeech() {
+        mTts = new TextToSpeech(getApplicationContext(), status -> {
+            if (status != TextToSpeech.SUCCESS) {
+                mTtsReady = false;
+                Log.w(TAG, "TextToSpeech initialization failed: " + status);
+                return;
+            }
+            int languageResult = mTts.setLanguage(Locale.SIMPLIFIED_CHINESE);
+            if (languageResult == TextToSpeech.LANG_MISSING_DATA
+                    || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                languageResult = mTts.setLanguage(Locale.getDefault());
+            }
+            mTtsReady = languageResult != TextToSpeech.LANG_MISSING_DATA
+                    && languageResult != TextToSpeech.LANG_NOT_SUPPORTED;
+            if (mTtsReady) {
+                mTts.setSpeechRate(1.0f);
+                mTts.setPitch(1.0f);
+            } else {
+                Log.w(TAG, "No supported TTS language is available");
+            }
+        });
+    }
+
+    private void speakAiResult(String text) {
+        if (mTts == null || !mTtsReady || TextUtils.isEmpty(text)) {
+            showShortMsg("系统语音播报不可用，请检查手机 TTS 语音包");
+            return;
+        }
+        Bundle params = new Bundle();
+        params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "deepseek_ai_result");
+        mTts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "deepseek_ai_result");
+    }
+
+    private void showAiSettingsDialog() {
+        AiSettings.Config config = AiSettings.load(this);
+        View dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_ai_settings, null);
+        final EditText apiKeyInput = dialogView.findViewById(R.id.et_ai_api_key);
+        final EditText promptInput = dialogView.findViewById(R.id.et_ai_prompt);
+        final EditText modelInput = dialogView.findViewById(R.id.et_ai_model);
+        final EditText endpointInput = dialogView.findViewById(R.id.et_ai_endpoint);
+
+        apiKeyInput.setText(config.apiKey);
+        promptInput.setText(config.prompt);
+        modelInput.setText(config.model);
+        endpointInput.setText(config.endpoint);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("DeepSeek AI 设置")
+                .setView(dialogView)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("取消", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String apiKey = apiKeyInput.getText().toString().trim();
+                    String prompt = promptInput.getText().toString().trim();
+                    String model = modelInput.getText().toString().trim();
+                    String endpoint = endpointInput.getText().toString().trim();
+
+                    if (apiKey.isEmpty()) {
+                        apiKeyInput.setError("请输入 DeepSeek API Key");
+                        apiKeyInput.requestFocus();
+                        return;
+                    }
+                    if (prompt.isEmpty()) {
+                        promptInput.setError("请输入提示词");
+                        promptInput.requestFocus();
+                        return;
+                    }
+                    if (!endpoint.startsWith("https://") && !endpoint.startsWith("http://")) {
+                        endpointInput.setError("API 地址必须以 https:// 或 http:// 开头");
+                        endpointInput.requestFocus();
+                        return;
+                    }
+
+                    AiSettings.save(this, new AiSettings.Config(apiKey, prompt, model, endpoint));
+                    dialog.dismiss();
+                    showShortMsg("AI 设置已保存");
+                }));
+        dialog.show();
     }
 
     private void showResolutionListDialog() {
@@ -355,6 +552,16 @@ public class USBCameraActivity extends AppCompatActivity implements CameraDialog
     protected void onDestroy() {
         super.onDestroy();
         FileUtils.releaseFile();
+        if (mAiExecutor != null) {
+            mAiExecutor.shutdownNow();
+            mAiExecutor = null;
+        }
+        if (mTts != null) {
+            mTts.stop();
+            mTts.shutdown();
+            mTts = null;
+            mTtsReady = false;
+        }
         // step.4 release uvc camera resources
         if (mCameraHelper != null) {
             mCameraHelper.release();

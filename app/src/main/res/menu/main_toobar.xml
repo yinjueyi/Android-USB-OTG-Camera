@@ -17,4 +17,8 @@
         android:id="@+id/menu_resolution"
         android:title="resolution(分辨率)"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/menu_ai_settings"
+        android:title="AI设置(API Key/提示词)"
+        app:showAsAction="never" />
 </menu>

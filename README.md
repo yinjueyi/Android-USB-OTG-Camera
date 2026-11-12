@@ -217,6 +217,46 @@ displaying:
 ![download](https://dl-download.csdn.net/down11/20221024/8c2e5835fb5dc94181c023818b8d7e55.apk)  
 
 
+
+AI Vision Voice Feature
+-------
+
+This fork adds an optional USB-camera AI observation feature:
+
+- A silent `AI Player` switch in the camera screen. It is on by default and
+  never plays media audio itself.
+- Every time the user turns the switch on or off, the app captures one JPEG,
+  sends it to the configured DeepSeek vision endpoint, and speaks the returned
+  text using the Android system TextToSpeech engine.
+- The API key, prompt, model and endpoint can be edited at runtime through
+  `AI设置(API Key/提示词)` in the toolbar overflow menu.
+- Default endpoint: `https://api.deepseek.com/chat/completions`
+- Default model: `deepseek-flash`
+- The image is sent inline as a base64 JPEG with `detail=low` to reduce latency
+  and token usage.
+
+### TTS choice
+
+The feature deliberately uses Android's built-in `TextToSpeech` API instead of
+bundling a neural TTS model. This adds no model files or native runtime to the
+APK, has very low memory/CPU overhead, and works with the phone's existing TTS
+engine. A Chinese TTS voice must be installed for Chinese speech. If the phone
+has no usable TTS voice, the returned DeepSeek text is still displayed on
+screen and a message is shown.
+
+If a fully self-contained offline neural voice is required, a small
+sherpa-onnx or Piper Chinese model can be added later, but it would increase
+the APK size substantially.
+
+### Security notes
+
+- The API key is stored only in the app's private SharedPreferences file.
+- Android backup is disabled so the key is not included in system backups.
+- The key is never hard-coded in this repository or written to logcat.
+- API usage is billed by DeepSeek according to the configured account.
+- The camera output is uploaded to the configured endpoint only when the AI
+  player switch is toggled.
+
 Other Library about Android Camera
 -------
 [OkCamera](https://github.com/jiangdongguo/OkCamera) Android Camera univsersally operation.  
